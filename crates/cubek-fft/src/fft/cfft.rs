@@ -255,6 +255,9 @@ fn cfft_shared_kernel<F: Float>(
         output_im_view.write_checked(k, shared_im[k]);
         k += threads_per_cube;
     }
+    // Barrier so no unit is still reading shared memory when the cube exits
+    // and a runtime that pools shared memory hands it to the next window.
+    sync_cube();
 }
 
 // --- Four-step path ----------------------------------------------------
@@ -442,6 +445,8 @@ fn cfft_four_step_radix1_kernel<F: Float>(
         scratch_im_view.write_checked(flat, w_re * ai + w_im * ar);
         k1 += threads_per_cube;
     }
+    // See cfft_shared_kernel: barrier before shared memory is reused.
+    sync_cube();
 }
 
 /// Second four-step pass: FFT_{N2} along n2 (contiguous), in place.
@@ -499,6 +504,8 @@ fn cfft_four_step_radix2_kernel<F: Float>(
         scratch_im_view.write_checked(row_base + k2, shared_im[k2]);
         k2 += threads_per_cube;
     }
+    // See cfft_shared_kernel: barrier before shared memory is reused.
+    sync_cube();
 }
 
 /// Transpose (N1, N2) -> (N2, N1) in each selected-axis window.

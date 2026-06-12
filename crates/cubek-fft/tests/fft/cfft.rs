@@ -114,6 +114,19 @@ fn cfft_roundtrip_axis_0_strided() {
     cfft_roundtrip_case([16, 2].to_vec(), 0);
 }
 
+// Batched cases: several windows transformed in one launch, every element
+// checked. Guards against per-window state (shared memory) bleeding between
+// concurrent cubes, which corrupts all but one window.
+#[test]
+fn cfft_roundtrip_batched() {
+    cfft_roundtrip_case([5, 16].to_vec(), 1);
+}
+
+#[test]
+fn cfft_roundtrip_batched_larger() {
+    cfft_roundtrip_case([4, 64].to_vec(), 1);
+}
+
 #[test]
 fn cfft_wrapper_roundtrip() {
     let client = <TestRuntime as Runtime>::client(&Default::default());
