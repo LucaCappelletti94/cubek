@@ -1,4 +1,5 @@
-//! Complex FFT used internally by the large-`n_fft` real-FFT paths.
+//! Batched 1D complex FFT, also used internally by the large-`n_fft`
+//! real-FFT paths.
 //!
 //! Two flavours live here:
 //!
@@ -14,11 +15,10 @@
 //!   converts the (N1, N2) internal layout to natural linear bin order on
 //!   the way out.
 //!
-//! The public API of this module is the single
-//! [`cfft_launch_any_size`] function which picks the right path.
-//!
-//! The caller is responsible for allocating any scratch buffers; see
-//! `rfft_large` for the allocator shape contract.
+//! The high-level [`cfft`] entry point allocates the outputs and runs the
+//! transform; [`cfft_launch_any_size`] takes pre-allocated buffers and picks
+//! the right path. Either way the caller owns any scratch (see `rfft_large`
+//! for the allocator shape contract).
 
 use core::f32::consts::PI;
 
@@ -36,11 +36,13 @@ use crate::{
     layout::BatchSignalLayout,
 };
 
-pub(crate) struct CfftBindings<R: Runtime> {
-    pub(crate) input_re: TensorBinding<R>,
-    pub(crate) input_im: TensorBinding<R>,
-    pub(crate) output_re: TensorBinding<R>,
-    pub(crate) output_im: TensorBinding<R>,
+/// Pre-allocated input/output buffers for [`cfft_launch_any_size`]. All four
+/// tensors must be contiguous and share the same shape.
+pub struct CfftBindings<R: Runtime> {
+    pub input_re: TensorBinding<R>,
+    pub input_im: TensorBinding<R>,
+    pub output_re: TensorBinding<R>,
+    pub output_im: TensorBinding<R>,
 }
 
 #[derive(Clone, Copy)]
@@ -77,12 +79,67 @@ pub(crate) fn factor_four_step(n_fft: usize, max_shared_n_fft: usize) -> (usize,
     (1 << log2_n1, 1 << log2_n2)
 }
 
+/// Complex FFT along `dim`. `input_re`/`input_im` must have identical
+/// contiguous shapes with a power-of-two length along `dim`; the returned
+/// `(re, im)` share that shape.
+///
+/// Both directions are unnormalized, so `Inverse` after `Forward` scales by
+/// `n` (the length along `dim`); divide by `n` yourself if you need it.
+pub fn cfft<R: Runtime>(
+    input_re: TensorHandle<R>,
+    input_im: TensorHandle<R>,
+    dim: usize,
+    dtype: StorageType,
+    fft_mode: FftMode,
+) -> (TensorHandle<R>, TensorHandle<R>) {
+    assert!(
+        input_re.shape() == input_im.shape(),
+        "real and imaginary inputs must have the same shape, got {:?} and {:?}",
+        input_re.shape(),
+        input_im.shape()
+    );
+    assert!(
+        dim < input_re.shape().len(),
+        "dim must be between 0 and {}",
+        input_re.shape().len()
+    );
+    assert!(
+        input_re.shape()[dim].is_power_of_two(),
+        "CFFT requires power-of-2 length"
+    );
+
+    let client = <R as Runtime>::client(&Default::default());
+    let shape = input_re.shape().clone();
+    let num_elems = shape.iter().product::<usize>();
+
+    let output_re =
+        TensorHandle::new_contiguous(shape.clone(), client.empty(num_elems * dtype.size()), dtype);
+    let output_im =
+        TensorHandle::new_contiguous(shape.clone(), client.empty(num_elems * dtype.size()), dtype);
+
+    cfft_launch_any_size::<R>(
+        &client,
+        CfftBindings {
+            input_re: input_re.binding(),
+            input_im: input_im.binding(),
+            output_re: output_re.clone().binding(),
+            output_im: output_im.clone().binding(),
+        },
+        dim,
+        dtype,
+        fft_mode,
+    )
+    .unwrap();
+
+    (output_re, output_im)
+}
+
 /// Entry point: complex FFT of `input` into `output`, along `dim`.
 /// `input` and `output` must be contiguous and have identical shape. The
 /// caller may safely pass the same buffer for input and output (aliasing is
 /// allowed for the small path; the large path does its own scratch
 /// management).
-pub(crate) fn cfft_launch_any_size<R: Runtime>(
+pub fn cfft_launch_any_size<R: Runtime>(
     client: &ComputeClient<R>,
     bindings: CfftBindings<R>,
     dim: usize,
